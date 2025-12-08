@@ -1,0 +1,22 @@
+# --- Security (CRITICAL) ---
+.env
+.env.local
+
+# --- Virtual Environments (Ignore the WHOLE folder) ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Python Clutter ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- IDE Settings (Optional but good) ---
+.vscode/
+.idea/
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db

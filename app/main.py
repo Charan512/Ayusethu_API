@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from database import batch_collection, batch_helper, database
-from ipfs_handler import upload_to_ipfs
+from .database import batch_collection, batch_helper, database
+from .ipfs_handler import upload_to_ipfs
 from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional

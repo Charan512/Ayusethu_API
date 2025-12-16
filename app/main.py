@@ -4,8 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 from pydantic import BaseModel
 from ml.inference import predict_species
-from .utils.jwt import verify_token
-from .utils.notify import notify
+from utils.jwt import verify_token
+from utils.notify import notify
 from .database import notification_collection, notification_helper,batch_collection, batch_helper
 from .ipfs_handler import upload_to_ipfs
 # ROUTERS

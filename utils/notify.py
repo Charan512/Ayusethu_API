@@ -1,5 +1,5 @@
 from datetime import datetime
-from app.database import notification_collection, user_collection
+from app.database import notification_collection, user_cols
 
 async def notify(
     user_id: str,
@@ -13,7 +13,7 @@ async def notify(
 
     # 🔥 FIX: expand ALL_MANUFACTURERS safely
     if user_id == "ALL_MANUFACTURERS":
-        async for u in user_collection.find({"role": "Manufacturer"}):
+        async for u in user_cols.find({"role": "Manufacturer"}):
             recipients.append(u["id"])
     else:
         recipients.append(user_id)

@@ -1,7 +1,7 @@
 # backend/routes/public.py (FINAL VERSION)
 
 from fastapi import APIRouter, HTTPException
-from app.database import batch_collection
+from app.database import batches_col
 from app.ipfs_handler import get_public_url
 from app.models.public import PublicBatchDetails, Stage, MediaItem
 from app.blockchain_client import verify_token
@@ -22,13 +22,13 @@ async def public_consumer_scan(product_unit_id: str):
     """
     
     # 1. Search for the batch document using the unique Product Unit ID
-    batch_doc = await batch_collection.find_one({
+    batch_doc = await batches_col.find_one({
         "packaging_data.unit_id": product_unit_id
     })
     
     # 2. Fallback: If not found by unit ID, try searching by the raw batch_id
     if not batch_doc:
-         batch_doc = await batch_collection.find_one({"batch_id": product_unit_id})
+         batch_doc = await batches_col.find_one({"batch_id": product_unit_id})
     
     if not batch_doc:
         raise HTTPException(status_code=404, detail=f"Product or Batch ID {product_unit_id} not found.")

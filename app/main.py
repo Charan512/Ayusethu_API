@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from ml.inference import predict_species
 from utils.jwt import verify_token
 from utils.notify import notify
-from .database import notification_collection, notification_helper,batch_collection, batch_helper
-from .ipfs_handler import upload_to_ipfs
+from app.database import notification_collection, notification_helper,batch_collection, batch_helper
+from app.ipfs_handler import upload_to_ipfs
 # ROUTERS
 from routes.auth import router as auth_router
 from routes.batches import router as batch_router

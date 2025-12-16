@@ -3,7 +3,7 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
 
-from database import users_col, user_helper
+from app.database import users_col, user_helper
 from utils.jwt import create_token
 import os
 

@@ -1,18 +1,23 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
+import json, random, os, httpx, uuid
+from fastapi import FastAPI, Depends, UploadFile, File, Form, Request, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from .database import batch_collection, batch_helper, database
-from .ipfs_handler import upload_to_ipfs
 from datetime import datetime
 from pydantic import BaseModel
-from typing import Optional
-import json
-import random
-import os
-import httpx  # ✅ NEW: used to call the bridge API
+from ml.inference import predict_species
+from .utils.jwt import verify_token
+from .utils.notify import notify
+from .database import notification_collection, notification_helper,batch_collection, batch_helper
+from .ipfs_handler import upload_to_ipfs
+# ROUTERS
+from routes.auth import router as auth_router
+from routes.batches import router as batch_router
+from routes.public import router as public_router
+from .blockchain_client import create_batch 
+from bson import ObjectId
 
 app = FastAPI()
 
-# Allow Frontend access
+# ================= CORS =================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,51 +26,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Database Collections ---
-user_collection = database.get_collection("users")
+# ================= ROUTERS =================
+app.include_router(auth_router)
+app.include_router(batch_router)
+app.include_router(public_router) 
+# ================= CONFIG =================
 
-# --- Blockchain Bridge Config ---
-BLOCKCHAIN_BASE_URL = os.getenv("BLOCKCHAIN_BASE_URL", "http://localhost:3000")
-
-
-# --- Helper functions to talk to the bridge/Fabric ---
-async def bridge_create_batch(payload: dict) -> dict:
-    """
-    Call the HerbChain bridge API (running in WSL) to create a batch on Fabric.
-    """
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(f"{BLOCKCHAIN_BASE_URL}/batches", json=payload)
-    # if Fabric/bridge returns an error, raise for FastAPI to handle
-    resp.raise_for_status()
-    return resp.json()
-
-
-async def bridge_get_batch(batch_id: str) -> dict:
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.get(f"{BLOCKCHAIN_BASE_URL}/batches/{batch_id}")
-    resp.raise_for_status()
-    return resp.json()
-
-
-async def bridge_list_batches() -> dict:
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.get(f"{BLOCKCHAIN_BASE_URL}/batches")
-    resp.raise_for_status()
-    return resp.json()
-
-
-# --- Pydantic Models ---
+# ================= MODELS =================
 class BatchCreate(BaseModel):
     species: str
     farmId: str
     startDate: str
     coords: str
 
-
 class ActorAssign(BaseModel):
     id: str
     name: str
-
 
 class BidSelection(BaseModel):
     batch_id: str
@@ -73,387 +49,795 @@ class BidSelection(BaseModel):
     manufacturer_name: str
     winning_price: float
 
+# =====================================================
+# 1️⃣ COLLECTOR / FARMER FLOW
+# =====================================================
 
-class UserLogin(BaseModel):
-    email: str
-    password: str
-    role: str
+@app.post("/api/collector/create-batch")
+async def create_batch_endpoint(data: BatchCreate, user=Depends(verify_token)): # Renamed function to avoid conflict
+    if user["role"] != "Collector":
+        raise HTTPException(403, "Collectors only")
 
+    batch_id = f"BATCH-{uuid.uuid4().hex[:10].upper()}"
 
-class UserRegister(BaseModel):
-    email: str
-    password: str
-    role: str
-    fullName: str
-    phone: Optional[str] = None
-    labName: Optional[str] = None
-    licenseNumber: Optional[str] = None
-    location: Optional[str] = None
-    companyName: Optional[str] = None
-    organization: Optional[str] = None
-
-
-# ==========================================
-# 0. AUTHENTICATION (Standard)
-# ==========================================
-@app.post("/api/auth/register")
-async def register_user(user: UserRegister):
-    existing_user = await user_collection.find_one({"email": user.email})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    user_dict = user.dict()
-    user_dict["created_at"] = datetime.now()
-    result = await user_collection.insert_one(user_dict)
-    return {
-        "message": "User registered successfully",
-        "userId": str(result.inserted_id),
-    }
-
-
-@app.post("/api/auth/login")
-async def login_user(user: UserLogin):
-    existing_user = await user_collection.find_one(
-        {"email": user.email, "role": user.role}
-    )
-    if not existing_user or existing_user["password"] != user.password:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {
-        "message": "Login successful",
-        "user": {
-            "name": existing_user["fullName"],
-            "email": existing_user["email"],
-            "role": existing_user["role"],
-            "id": str(existing_user["_id"]),
-        },
-    }
-
-
-# ==========================================
-# 1. FARMER ENDPOINTS (Stages 2, 3, 4 Logic + Fabric link)
-# ==========================================
-@app.post("/api/farmer/register")
-async def register_batch(data: BatchCreate):
-    """
-    1) Store batch in Mongo (your workflow DB)
-    2) Also create a corresponding batch on Fabric via the bridge API
-    """
-    # 1) Your existing DB logic
-    new_batch_id = f"BATCH-{int(datetime.now().timestamp())}"
-    new_batch = {
-        "batch_id": new_batch_id,
+    batch = {
+        "batch_id": batch_id,
         "herb_name": data.species,
         "farmer_id": data.farmId,
-        "farmer_name": "Ramesh Kumar",  # TODO: link with user later
-        "quantity": 0,
+        "farmer_name": "Unknown",
         "location": data.coords,
         "status": "planting",
         "timeline": {"planting": data.startDate},
-        "created_at": datetime.now(),
-    }
-    await batch_collection.insert_one(new_batch)
-
-    # 2) Call Fabric via bridge (best-effort; you can adjust payload mapping)
-    bridge_payload = {
-        # match chaincode's collectHerbBatch signature:
-        # batchId, farmerId, collectorId, herbName, geo1, geo2,
-        # harvestDate, grade, speciesScore, geoScore, notes
-        "batchId": new_batch_id,
-        "farmerId": data.farmId,
-        "collectorId": "COLLECTOR1",  # TODO: wire real collector later
-        "herbName": data.species.upper(),
-        "geo1": data.coords.split(",")[0].strip() if "," in data.coords else data.coords,
-        "geo2": (
-            data.coords.split(",")[1].strip()
-            if "," in data.coords and len(data.coords.split(",")) > 1
-            else data.coords
-        ),
-        "harvestDate": data.startDate,
-        "grade": "GRADE-A",  # you can adjust when lab approves
-        "speciesScore": 95,
-        "geoScore": 90,
-        "notes": "Created via FastAPI farmer/register",
-    }
-
-    blockchain_status = None
-    try:
-        blockchain_status = await bridge_create_batch(bridge_payload)
-    except httpx.HTTPError as e:
-        # You can choose to log this and still return success,
-        # or raise an error to force on-chain consistency.
-        # For now, we just include the error info in response.
-        blockchain_status = {
-            "success": False,
-            "error": str(e),
+        "createdAt": datetime.utcnow(),
+        "collector_data": {
+            "id": user["id"],
+            "name": user.get("name", "Collector")
         }
-
-    return {
-        "message": "Success",
-        "batchId": new_batch_id,
-        "blockchain": blockchain_status,
     }
 
+    await batch_collection.insert_one(batch)
 
+    # --- Initial Fabric Anchor: Basic Facts Only ---
+    await create_batch({
+        "batchId": batch_id,
+        "farmerId": data.farmId,
+        "collectorId": user["id"],
+        "herbName": data.species.upper(),
+        "geo1": data.coords,
+        "harvestDate": data.startDate,
+        "grade": "INITIAL",      # Placeholder
+        "speciesScore": 0,       # Placeholder
+        "geoScore": 0,           # Placeholder
+    })
+    # --- END Initial Anchor ---
+    
+    await notify(
+    user_id=data.farmId,
+    role="Farmer",
+    title="New Batch Created",
+    message=f"A new batch {batch_id} has been registered for your farm",
+    batch_id=batch_id,
+    category="batch"
+    )
+    return {"batchId": batch_id}
 @app.get("/api/farmer/crops/{farmer_id}")
-async def get_farmer_crops(farmer_id: str):
-    batches = []
-    async for batch in batch_collection.find({"farmer_id": farmer_id}):
-        batches.append(batch_helper(batch))
-    return batches
+async def farmer_crops(farmer_id: str, user=Depends(verify_token)):
+    if user["role"] != "Farmer" or user["id"] != farmer_id:
+        raise HTTPException(403)
 
+    return [batch_helper(b) async for b in batch_collection.find({"farmer_id": farmer_id})]
 
-# NEW: Explicit Farmer Updates for Stages 2, 3, 4
-@app.post("/api/farmer/update-growth")
-async def update_growth(
+@app.post("/api/farmer/update-stage")
+async def farmer_update_stage(
+    batch_id: str = Body(...),
+    stage: int = Body(...),
+    data: dict = Body(...),
+    user=Depends(verify_token)
+):
+    if user["role"] != "Farmer":
+        raise HTTPException(403)
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch or batch["farmer_id"] != user["id"]:
+        raise HTTPException(403)
+
+    await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {"$set": {f"farmer_updates.stage_{stage}": data, "status": f"farmer_stage_{stage}_submitted"}}
+    )
+    return {"message": "Stage submitted"}
+
+# ✅ FIX: Renamed to /api/collector/update-stage, removed farmer alias
+@app.post("/api/collector/update-stage")
+async def collector_update_stage(
     batch_id: str = Form(...),
     stage: int = Form(...),
     notes: str = Form(...),
     photo: UploadFile = File(...),
+    user=Depends(verify_token)
 ):
-    content = await photo.read()
-    cid = await upload_to_ipfs(content, photo.filename)
+    if user["role"] != "Collector":
+        raise HTTPException(403)
 
-    await batch_collection.update_one(
-        {"batch_id": batch_id},
-        {
-            "$set": {
-                f"timeline.stage_{stage}": datetime.now().isoformat(),
-                f"growth_data.stage_{stage}": {"cid": cid, "notes": notes},
-                "status": f"growing_stage_{stage}",
-            }
-        },
-    )
-    return {"message": f"Stage {stage} Updated by Farmer"}
-
-
-# ==========================================
-# 2. ADMIN ENDPOINTS (Selection Logic Added)
-# ==========================================
-@app.get("/api/admin/dashboard")
-async def get_admin_data():
-    batches = []
-    async for batch in batch_collection.find():
-        batches.append(batch_helper(batch))
-    return {"batches": batches}
-
-
-@app.put("/api/admin/assign-collector/{batch_id}")
-async def assign_collector(batch_id: str, actor: ActorAssign):
-    await batch_collection.update_one(
-        {"batch_id": batch_id},
-        {
-            "$set": {
-                "collector_data": {"id": actor.id, "name": actor.name},
-                "status": "collection_assigned",
-                "timeline.collection_assigned": datetime.now().isoformat(),
-            }
-        },
-    )
-    return {"message": "Assigned"}
-
-
-@app.post("/api/admin/broadcast-to-labs/{batch_id}")
-async def broadcast_to_labs(batch_id: str):
-    await batch_collection.update_one(
-        {"batch_id": batch_id}, {"$set": {"status": "waiting_for_lab"}}
-    )
-    return {"message": "Broadcasted to Labs"}
-
-
-# NEW: Admin selects winning manufacturer (Step 3b)
-@app.post("/api/admin/select-manufacturer")
-async def select_manufacturer(bid: BidSelection):
-    # Generate Label ID as per workflow Step 3e
-    label_id = f"LBL-{bid.batch_id}-{random.randint(1000,9999)}"
-
-    await batch_collection.update_one(
-        {"batch_id": bid.batch_id},
-        {
-            "$set": {
-                "manufacturer_data": {
-                    "id": bid.manufacturer_id,
-                    "name": bid.manufacturer_name,
-                    "agreed_price": bid.winning_price,
-                    "label_id": label_id,  # Stored here, sent to manuf later
-                },
-                "status": "manufacturing_assigned",
-                "timeline.manufacturer_assigned": datetime.now().isoformat(),
-            }
-        },
-    )
-    return {"message": "Manufacturer Selected & Label ID Generated"}
-
-
-# ==========================================
-# 3. COLLECTOR ENDPOINTS (Stages 1 & 5)
-# ==========================================
-@app.post("/api/ml/identify")
-async def identify_herb(photo: UploadFile = File(...)):
-    herbs = ["Tulsi (Holy Basil)", "Ashwagandha", "Turmeric", "Neem"]
-    detected = random.choice(herbs)
-    return {"success": True, "species": detected, "confidence": 0.98}
-
-
-@app.post("/api/collector/update-stage")
-async def update_stage(
-    batch_id: str = Form(...),
-    stage: str = Form(...),  # 1 or 5
-    photo: UploadFile = File(...),
-):
-    content = await photo.read()
-    cid = await upload_to_ipfs(content, photo.filename)
-
-    status_update = "growing" if stage == "1" else "collected"
-
-    await batch_collection.update_one(
-        {"batch_id": batch_id},
-        {
-            "$set": {
-                f"collector_data.stage_{stage}_cid": cid,
-                "status": status_update,
-                f"timeline.collector_stage_{stage}": datetime.now().isoformat(),
-            }
-        },
-    )
-    return {"message": "Stage Updated", "cid": cid}
-
-
-# ==========================================
-# 4. LAB ENDPOINTS (First Accept Logic)
-# ==========================================
-@app.post("/api/lab/accept-task")
-async def accept_task(
-    batch_id: str = Body(..., embed=True),
-    lab_id: str = Body(..., embed=True),
-    lab_name: str = Body(..., embed=True),
-):
-    # Check if already assigned (Locking mechanism)
     batch = await batch_collection.find_one({"batch_id": batch_id})
-    if batch.get("lab_data", {}).get("id"):
-        raise HTTPException(
-            status_code=400, detail="Batch already assigned to another lab"
+    if not batch or batch["collector_data"]["id"] != user["id"]:
+        raise HTTPException(403)
+
+    cid = await upload_to_ipfs(await photo.read(), photo.filename)
+
+    await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {"$set": {
+            f"growth_data.stage_{stage}": {
+                "cid": cid,
+                "notes": notes,
+                "updated_at": datetime.utcnow()
+            },
+            f"timeline.stage_{stage}": datetime.utcnow().isoformat(),
+            "status": f"growing_stage_{stage}"
+        }}
+    )
+    return {"message": f"Stage {stage} updated"}
+
+@app.post("/api/collector/verify-leaf")
+async def verify_leaf(
+    batch_id: str = Form(...),
+    image: UploadFile = File(...),
+    user=Depends(verify_token)
+):
+    if user["role"] != "Collector":
+        raise HTTPException(403, "Collectors only")
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+
+    image_bytes = await image.read()
+
+    predicted_species = predict_species(image_bytes)
+    expected_species = batch["herb_name"]
+
+    match = predicted_species.lower() == expected_species.lower()
+    if match:
+        await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {"$set": {"ml_verified": True}}
+    )
+
+    if not match:
+        await notify(
+            user_id=batch["farmer_id"],
+            role="Farmer",
+            title="Species Mismatch Detected",
+            message=f"ML verification failed for batch {batch_id}",
+            batch_id=batch_id,
+            category="ml"
         )
 
+    return {
+        "batch_id": batch_id,
+        "predicted_species": predicted_species,
+        "expected_species": expected_species,
+        "match": match
+    }
+
+# \u2705 FIX: Added missing collector batch endpoints
+@app.get("/api/collector/batches")
+async def collector_batches(user=Depends(verify_token)):
+    if user["role"] != "Collector":
+        raise HTTPException(403)
+    
+    return [batch_helper(b) async for b in batch_collection.find({
+        "collector_data.id": user["id"]
+    })]
+
+@app.get("/api/collector/batch/{batch_id}")
+async def collector_batch(batch_id: str, user=Depends(verify_token)):
+    if user["role"] != "Collector":
+        raise HTTPException(403)
+    
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch or batch.get("collector_data", {}).get("id") != user["id"]:
+        raise HTTPException(403, "Not your batch")
+    
+    return batch_helper(batch)
+
+# ✅ CRITICAL: User profile validation
+@app.get("/api/auth/me")
+async def get_current_user(user=Depends(verify_token)):
+    """Get current authenticated user info"""
+    return {
+        "id": user["id"],
+        "name": user.get("name", "User"),
+        "role": user["role"],
+        "email": user.get("email", "")
+    }
+
+# ✅ CRITICAL: Active batch restoration
+@app.get("/api/collector/active-batch")
+async def get_active_batch(user=Depends(verify_token)):
+    """Get collector's active batch with full state"""
+    if user["role"] != "Collector":
+        raise HTTPException(403)
+    
+    # Find most recent batch assigned to this collector
+    batch = await batch_collection.find_one(
+        {"collector_data.id": user["id"]},
+        sort=[("createdAt", -1)]
+    )
+    
+    if not batch:
+        return None
+    
+    # Calculate current stage and completed stages
+    stage_data = batch.get("growth_data", {})
+    completed_stages = []
+    current_stage = 1
+    
+    # Check which stages are completed
+    for i in range(1, 6):
+        if stage_data.get(f"stage_{i}"):
+            completed_stages.append(i)
+            current_stage = i + 1 if i < 5 else 5
+    
+    return {
+        "batch_id": batch["batch_id"],
+        "current_stage": min(current_stage, 5),
+        "completed_stages": completed_stages,
+        "stage_data": stage_data,
+        "herb_name": batch.get("herb_name"),
+        "farmer_id": batch.get("farmer_id"),
+        "location": batch.get("location"),
+        "ml_verified": batch.get("ml_verified", False)
+    }
+
+# ✅ CRITICAL: Fetch farmer submissions per stage
+@app.get("/api/collector/batch/{batch_id}/stage/{stage}")
+async def get_stage_data(batch_id: str, stage: int, user=Depends(verify_token)):
+    """Get farmer's submission data for specific stage"""
+    if user["role"] != "Collector":
+        raise HTTPException(403)
+    
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    
+    if batch.get("collector_data", {}).get("id") != user["id"]:
+        raise HTTPException(403, "Not your batch")
+    
+    stage_key = f"stage_{stage}"
+    stage_data = batch.get("growth_data", {}).get(stage_key, {})
+    
+    return {
+        "photos": [stage_data.get("cid")] if stage_data.get("cid") else [],
+        "notes": stage_data.get("notes", ""),
+        "timestamp": stage_data.get("updated_at"),
+        "status": "submitted" if stage_data else "pending",
+        "submitted": bool(stage_data)  # \u2705 CRITICAL: Boolean flag for frontend
+    }
+
+
+
+# =====================================================
+# 2️⃣ ADMIN FLOW
+# =====================================================
+
+@app.get("/api/admin/dashboard")
+async def admin_dashboard(user=Depends(verify_token)):
+    if user["role"] != "Admin":
+        raise HTTPException(403)
+    return {"batches": [batch_helper(b) async for b in batch_collection.find()]}
+
+@app.put("/api/admin/assign-collector/{batch_id}")
+async def assign_collector(batch_id: str, actor: ActorAssign, user=Depends(verify_token)):
+    if user["role"] != "Admin":
+        raise HTTPException(403)
+
     await batch_collection.update_one(
         {"batch_id": batch_id},
+        {"$set": {
+            "collector_data": actor.dict(),
+            "status": "collection_assigned",
+            "timeline.collection_assigned": datetime.utcnow().isoformat()
+        }}
+    )
+    await notify(
+    user_id=actor.id,
+    role="Collector",
+    title="New Collection Assigned",
+    message=f"You have been assigned to batch {batch_id}",
+    batch_id=batch_id,
+    category="assignment"
+    )
+
+    return {"message": "Collector assigned"}
+
+@app.post("/api/admin/select-manufacturer")
+async def select_manufacturer(
+    batch_id: str = Body(...),
+    manufacturer_id: str = Body(...),
+    user=Depends(verify_token)
+):
+    if user["role"] != "Admin":
+        raise HTTPException(403)
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404)
+
+    if batch["status"] != "bidding_open":
+        raise HTTPException(400, "Batch not in bidding state")
+
+    quote = next(
+        (q for q in batch.get("quotes", []) if q["manufacturer_id"] == manufacturer_id),
+        None
+    )
+    if not quote:
+        raise HTTPException(400, "Selected manufacturer has no quote")
+
+    label_id = f"LBL-{batch_id}-{random.randint(1000,9999)}"
+
+    await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {"$set": {
+            "manufacturer_data": {
+                "id": manufacturer_id,
+                "name": quote.get("manufacturer_name"),
+                "price": quote["price"],
+                "label_id": label_id
+            },
+            "status": "manufacturing_assigned"
+        }}
+    )
+    await notify(
+        user_id=manufacturer_id,
+        role="Manufacturer",
+        title="Manufacturing Assigned",
+        message=f"You have been selected to manufacture batch {batch_id}",
+        batch_id=batch_id,
+        category="manufacturing"
+    )
+
+    return {"message": "Manufacturer selected"}
+
+# =====================================================
+# 3️⃣ LAB FLOW
+# =====================================================
+@app.post("/api/lab/accept")
+async def accept_lab_task(batch_id: str = Body(...), user=Depends(verify_token)):
+    if user["role"] != "Tester":
+        raise HTTPException(403)
+
+    # Atomic lock: only one tester can win
+    result = await batch_collection.update_one(
+        {
+            "batch_id": batch_id,
+            "status": "testing_assigned"
+        },
         {
             "$set": {
-                "lab_data": {"id": lab_id, "name": lab_name},
-                "status": "testing_assigned",
-                "timeline.lab_assigned": datetime.now().isoformat(),
+                "lab_data.tester_id": user["id"],
+                "lab_data.name": user.get("name"),
+                "lab_data.accepted_at": datetime.utcnow(),
+                "status": "testing_in_progress"
             }
-        },
+        }
     )
-    return {"message": "Task Accepted"}
 
+    if result.modified_count == 0:
+        raise HTTPException(409, "Batch already accepted")
+    await notification_collection.update_many(
+    {"batch_id": batch_id, "role": "Tester"},
+    {"$set": {"read": True}}
+)
+    return {"message": "Batch accepted"}
+
+@app.get("/api/lab/batches")
+async def lab_batches(user=Depends(verify_token)):
+    if user["role"] != "Tester":
+        raise HTTPException(403)
+
+    return [batch_helper(b) async for b in batch_collection.find({
+        "$or": [{"status": "testing_assigned"}, {"lab_data.tester_id": user["id"]}]
+    })]
 
 @app.post("/api/lab/submit")
-async def submit_lab_result(
+async def submit_lab(
     batch_id: str = Form(...),
     result_json: str = Form(...),
     report: UploadFile = File(None),
+    user=Depends(verify_token)
 ):
-    data = json.loads(result_json)
-    cid = None
-    if report:
-        content = await report.read()
-        cid = await upload_to_ipfs(content, report.filename)
+    if user["role"] != "Tester":
+        raise HTTPException(403)
 
-    # If pass -> Open for Bidding (Step 3a)
-    status = "bidding_open" if data.get("passed") else "rejected"
+    result = json.loads(result_json)
+    cid = await upload_to_ipfs(await report.read(), report.filename) if report else None
 
     await batch_collection.update_one(
-        {"batch_id": batch_id},
-        {
-            "$set": {
-                "lab_data.results": data,
-                "lab_data.report_cid": cid,
-                "status": status,
-                "lab_data.quality_score": 95 if data.get("passed") else 40,
-            }
-        },
+    {"batch_id": batch_id},
+    {"$set": {
+        "lab_data.results": result,
+        "lab_data.report_cid": cid,
+
+        # ✅ ADD THESE 3 LINES
+        "lab_data.tester_id": user["id"],
+        "lab_data.tester_name": user.get("name"),
+        "lab_data.submitted_at": datetime.utcnow(),
+
+        "status": "bidding_open" if result.get("passed") else "rejected"
+    }}
+)
+
+
+    if result.get("passed"):
+        await notify(
+        user_id="ALL_MANUFACTURERS",
+        role="Manufacturer",
+        title="Bidding Open",
+        message=f"Bidding is now open for batch {batch_id}",
+        batch_id=batch_id,
+        category="bidding"
     )
-    return {"message": "Lab Result Saved"}
 
 
-# ==========================================
-# 5. MANUFACTURER ENDPOINTS
-# ==========================================
-@app.get("/api/manufacturer/batches")
-async def get_manuf_batches():
-    batches = []
-    # Manufacturer sees batches open for bidding OR assigned to them
-    async for batch in batch_collection.find(
-        {"status": {"$in": ["bidding_open", "manufacturing_assigned", "manufacturing"]}}
-    ):
-        b_data = batch_helper(batch)
-        b_data["name"] = b_data["herb_name"]
-        b_data["testScore"] = batch.get("lab_data", {}).get("quality_score", 0)
-        batches.append(b_data)
-    return batches
-
-
-@app.post("/api/manufacturer/quote")
-async def submit_quote(
-    batch_id: str = Body(..., embed=True),
-    manufacturer_id: str = Body(..., embed=True),
-    amount: float = Body(..., embed=True),
-):
-    # Add bid to a list of bids in the document
-    await batch_collection.update_one(
-        {"batch_id": batch_id},
-        {
-            "$push": {
-                "bids": {
-                    "manufacturer_id": manufacturer_id,
-                    "amount": amount,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            }
-        },
-    )
-    return {"message": "Quote Submitted"}
-
-
-@app.post("/api/manufacturer/submit-process")
-async def submit_process(
-    batch_id: str = Form(...),
-    process_data: str = Form(...),
-):
-    await batch_collection.update_one(
-        {"batch_id": batch_id},
-        {
-            "$set": {
-                "manufacturer_data.process": json.loads(process_data),
-                "status": "packaging",
-            }
-        },
-    )
-    return {"message": "Process Recorded"}
-
-
-# ==========================================
-# 6. USER ENDPOINT
-# ==========================================
-@app.get("/api/public/scan/{batch_id}")
-async def public_scan(batch_id: str):
+    # Notify Farmer
     batch = await batch_collection.find_one({"batch_id": batch_id})
-    if batch:
-        data = batch_helper(batch)
-        return {
-            "code": data["batch_id"],
-            "name": data["herb_name"],
-            "farmerName": data["farmer_name"],
-            "region": data["location"],
-            "qualityGrade": "A+" if data["complianceScore"] > 90 else "B",
-            "purity": f"{data['complianceScore']}%",
-            "harvestDate": data["timeline"].get("collection_assigned", "Pending"),
-            "status": data["status"],
-            "description": "Verified Authentic via VirtuHerbChain Blockchain.",
+    await notify(
+        user_id=batch["farmer_id"],
+        role="Farmer",
+        title="Lab Results Ready",
+        message=f"Lab results are available for batch {batch_id}",
+        batch_id=batch_id,
+        category="lab"
+    )
+
+    return {"message": "Lab submitted"}
+@app.get("/api/lab/history")
+async def lab_history(user=Depends(verify_token)):
+    if user["role"] != "Tester":
+        raise HTTPException(403)
+
+    history = []
+    async for b in batch_collection.find({
+        "lab_data.tester_id": user["id"]
+    }).sort("lab_data.submitted_at", -1):
+        history.append({
+            "batch_id": b["batch_id"],
+            "herb_name": b.get("herb_name"),
+            "status": b.get("status"),
+            "passed": b.get("lab_data", {}).get("results", {}).get("passed"),
+            "submitted_at": b.get("lab_data", {}).get("submitted_at"),
+            "report_cid": b.get("lab_data", {}).get("report_cid"),
+        })
+
+    return history
+
+# =====================================================
+# 4️⃣ PUBLIC SCAN
+# =====================================================
+
+
+# =====================================================
+# 🔔 NOTIFICATIONS (ALL ROLES)
+# =====================================================
+
+@app.get("/api/notifications")
+async def get_notifications(user=Depends(verify_token)):
+    notifications = []
+    async for n in notification_collection.find(
+        {"user_id": user["id"]},
+        sort=[("createdAt", -1)]
+    ):
+        notifications.append(notification_helper(n))
+    return notifications
+
+@app.put("/api/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, user=Depends(verify_token)):
+    await notification_collection.update_one(
+        {
+            "_id": ObjectId(notification_id),
+            "user_id": user["id"]
+        },
+        {"$set": {"read": True}}
+    )
+    return {"message": "Notification marked as read"}
+
+
+# =====================================================
+# 🛠️ UTILITIES
+# =====================================================
+
+@app.post("/api/utils/reverse-geocode")
+async def reverse_geocode(lat: float = Body(...), lon: float = Body(...)):
+    """Server-side reverse geocoding to avoid client rate limits"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={"lat": lat, "lon": lon, "format": "json"},
+                headers={"User-Agent": "VirtuHerbChain/1.0"}
+            )
+            return res.json()
+    except Exception as e:
+        raise HTTPException(500, f"Geocoding failed: {str(e)}")
+
+
+# =====================================================
+# ⛓️ BLOCKCHAIN ANCHORING
+# =====================================================
+
+@app.post("/api/blockchain/anchor-batch")
+async def anchor_batch(batch_id: str = Body(...), user=Depends(verify_token)):
+    """Anchor final batch status to blockchain after all verifications complete."""
+    if user["role"] != "Collector":
+        raise HTTPException(403, "Collectors only")
+    
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    
+    if batch.get("collector_data", {}).get("id") != user["id"]:
+        raise HTTPException(403, "Not your batch")
+    
+    # Check prerequisites: Must be lab-approved AND ML-verified
+    is_lab_passed = batch.get("lab_data", {}).get("results", {}).get("passed", False)
+    is_ml_verified = batch.get("ml_verified", False)
+    
+    if not is_lab_passed or not is_ml_verified:
+        raise HTTPException(400, "Batch requires both ML verification and Lab approval before final anchoring.")
+    
+    if batch.get("blockchain_tx"):
+        raise HTTPException(400, "Batch already anchored")
+    
+    # --- Final Fabric Anchor: Use Available Verification Data ---
+    final_grade = "PASSED" if is_lab_passed else "FAILED"
+    
+    try:
+        anchor_response = await create_batch({
+            "batchId": batch_id,
+            "farmerId": batch["farmer_id"],
+            "collectorId": user["id"],
+            "herbName": batch["herb_name"].upper(),
+            "geo1": batch["location"],
+            "grade": final_grade,
+            "speciesScore": 100 if is_ml_verified else 0, 
+            "geoScore": 100, 
+        })
+        
+        tx_hash = anchor_response.get("txHash")
+        if not tx_hash:
+            raise Exception("Fabric bridge did not return a transaction hash.")
+        
+        await batch_collection.update_one(
+            {"batch_id": batch_id},
+            {"$set": {
+                "blockchain_tx": tx_hash,
+                "status": "blockchain_anchored",
+                "anchored_at": datetime.utcnow()
+            }}
+        )
+        
+        return {"tx_hash": tx_hash, "message": "Batch anchored to blockchain"}
+    except Exception as e:
+        raise HTTPException(500, f"Blockchain anchoring failed: {str(e)}")
+@app.post("/api/manufacturer/submit-quote")
+async def submit_quote(
+    batch_id: str = Body(...),
+    price: float = Body(...),
+    validity: str = Body(...),
+    notes: str = Body(""),
+    user=Depends(verify_token)
+):
+    if user["role"] != "Manufacturer":
+        raise HTTPException(403, "Manufacturers only")
+
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+
+    if batch["status"] != "bidding_open":
+        raise HTTPException(400, "Bidding closed for this batch")
+
+    # prevent duplicate bids
+    existing = next(
+        (q for q in batch.get("quotes", []) if q["manufacturer_id"] == user["id"]),
+        None
+    )
+    if existing:
+        raise HTTPException(400, "Quote already submitted")
+
+    quote = {
+    "quote_id": str(uuid.uuid4()),
+    "manufacturer_id": user["id"],
+    "manufacturer_name": user.get("name"),
+    "price": price,
+    "validity": validity,
+    "notes": notes,
+    "submitted_at": datetime.utcnow()
+}
+
+
+    await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {"$push": {"quotes": quote}}
+    )
+
+    return {"message": "Quote submitted successfully"}
+@app.get("/api/admin/quotes/{batch_id}")
+async def get_quotes(batch_id: str, user=Depends(verify_token)):
+    if user["role"] != "Admin":
+        raise HTTPException(403)
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404)
+
+    return batch.get("quotes", [])
+@app.post("/api/manufacturer/submit-manufacturing")
+async def submit_manufacturing(
+    request: Request,
+    batch_id: str = Form(...),
+    user=Depends(verify_token),
+):
+
+    if user["role"] != "Manufacturer":
+        raise HTTPException(403)
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404)
+
+    if batch["status"] != "manufacturing_assigned":
+        raise HTTPException(400, "Manufacturing not allowed")
+
+    if batch["manufacturer_data"]["id"] != user["id"]:
+        raise HTTPException(403, "Not authorized")
+    form = await request.form()
+    await batch_collection.update_one(
+    {"batch_id": batch_id},
+    {"$set": {
+        "manufacturing_data": {
+            "submitted_by": user["id"],
+            "submitted_at": datetime.utcnow(),
+            "raw_form": dict(form)  # store everything safely
+        },
+        "status": "manufacturing_done"
+    }}
+)
+    return {"message": "Manufacturing data submitted"}
+@app.post("/api/admin/publish-tester-request")
+async def publish_tester_request(
+    batch_id: str = Body(...),
+    user=Depends(verify_token)
+):
+    if user["role"] != "Admin":
+        raise HTTPException(403, "Admins only")
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+
+    # Prevent duplicate publishing
+    if batch.get("status") in ["testing_assigned", "testing_in_progress"]:
+        raise HTTPException(400, "Testing already published or in progress")
+
+    # Only allow after verification stage
+    if batch.get("status") in [
+    "testing_assigned",
+    "testing_in_progress",
+    "bidding_open",
+    "manufacturing_assigned"
+    ]:
+        raise HTTPException(400, "Batch not eligible for lab testing")
+
+    # Update batch state
+    await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {
+            "$set": {
+                "status": "testing_assigned",
+                "testing_published_at": datetime.utcnow()
+            }
         }
-    raise HTTPException(status_code=404, detail="Batch not found")
+    )
+
+    # 🔔 Notify ALL testers (fan-out notification)
+    await notify(
+        user_id="ALL_TESTERS",
+        role="Tester",
+        title="New Lab Test Available",
+        message=f"Batch {batch_id} is available for testing. First to accept will be assigned.",
+        batch_id=batch_id,
+        category="lab"
+    )
+
+    return {
+        "message": "Tester request published successfully",
+        "batch_id": batch_id
+    }
 
 
-if __name__ == "__main__":
-    import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.post("/api/manufacturer/complete-packaging")
+async def complete_packaging(
+    batch_id: str = Form(...),
+    user=Depends(verify_token),
+):
+    if user["role"] != "Manufacturer":
+        raise HTTPException(403)
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch:
+        raise HTTPException(404)
+
+    if batch["status"] != "manufacturing_done":
+        raise HTTPException(400, "Packaging not allowed")
+
+    if batch["manufacturer_data"]["id"] != user["id"]:
+        raise HTTPException(403)
+    product_unit_id = f"PROD-{uuid.uuid4().hex[:12].upper()}" 
+    fabric_anchor_payload = {
+        "unitId": product_unit_id,
+        "batchId": batch_id,
+        "manufacturerId": user["id"],
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    anchor_response = await create_batch(fabric_anchor_payload)
+    final_tx_hash = anchor_response.get("txHash") 
+    await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {"$set": {
+            "packaged_at": datetime.utcnow(),
+            "status": "packaged",
+            "packaging_data": { 
+                "unit_id": product_unit_id,
+                "fabric_final_tx": final_tx_hash,
+            }
+        }}
+    )
+    return {"message": "Packaging completed and anchored", "product_unit_id": product_unit_id}
+async def manufacturer_batches(user=Depends(verify_token)):
+    if user["role"] != "Manufacturer":
+        raise HTTPException(403)
+
+    return [
+        batch_helper(b)
+        async for b in batch_collection.find({
+            "$or": [
+                {"status": "testing_assigned"},
+                {
+                    "status": "testing_in_progress",
+                    "lab_data.tester_id": user["id"]
+                }
+            ]
+        })
+    ]
+@app.get("/api/farmer/batches")
+async def farmer_batches_simple(user=Depends(verify_token)):
+    if user["role"] != "Farmer":
+        raise HTTPException(403)
+    return [batch_helper(b) async for b in batch_collection.find({"farmer_id": user["id"]})]
+@app.post("/api/farmer/submit-stage-proof")
+async def farmer_submit_stage_proof(
+    batch_id: str = Form(...),
+    stage: int = Form(...),
+    notes: str = Form(...),
+    photo: UploadFile = File(...),
+    user=Depends(verify_token)
+):
+    if user["role"] != "Farmer":
+        raise HTTPException(403)
+
+    batch = await batch_collection.find_one({"batch_id": batch_id})
+    if not batch or batch["farmer_id"] != user["id"]:
+        raise HTTPException(403, "Not your batch")
+        
+    cid = await upload_to_ipfs(await photo.read(), photo.filename)
+
+    await batch_collection.update_one(
+        {"batch_id": batch_id},
+        {"$set": {
+            f"farmer_updates.stage_{stage}": {
+                "cid": cid,
+                "notes": notes,
+                "updated_at": datetime.utcnow(),
+                "submitted_by": user["id"]
+            },
+            "status": f"farmer_stage_{stage}_submitted" 
+        }}
+    )
+    
+    collector_id = batch.get("collector_data", {}).get("id")
+    if collector_id:
+        await notify(
+            user_id=collector_id,
+            role="Collector",
+            title=f"Stage {stage} Ready",
+            message=f"Farmer {user['full_name']} submitted proof for Batch {batch_id}. Review required.",
+            batch_id=batch_id,
+            category="review"
+        )
+    
+    return {"message": f"Stage {stage} proof submitted to IPFS and pending Collector review."}

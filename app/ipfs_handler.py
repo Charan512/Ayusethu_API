@@ -1,14 +1,32 @@
+# backend/app/ipfs_handler.py (MODIFIED to support local/public fallback)
+
 import httpx
+import os
 
-# Assumes local IPFS node. If not running, it returns a mock hash.
-IPFS_URL = "http://127.0.0.1:5001/api/v0/add"
+# --- NEW/MODIFIED ENVIRONMENT VARIABLES ---
+# 1. Local Gateway (For prototype testing, based on your log)
+# Set in .env: IPFS_GATEWAY_LOCAL="http://127.0.0.1:8080/ipfs/"
+IPFS_GATEWAY_LOCAL = os.getenv("IPFS_GATEWAY_LOCAL", "http://127.0.0.1:8080/ipfs/")
 
-async def upload_to_ipfs(file_bytes, filename):
-    try:
-        async with httpx.AsyncClient() as client:
-            files = {'file': (filename, file_bytes)}
-            # response = await client.post(IPFS_URL, files=files) 
-            # Uncomment above line if IPFS is real. For now, mocking to ensure stability:
-            return f"QmHash{hash(file_bytes)}Mock"
-    except Exception:
-        return "QmFailedUpload"
+# Set in .env: IPFS_GATEWAY_PUBLIC="https://ipfs.io/ipfs/" (or Pinata)
+IPFS_GATEWAY_PUBLIC = os.getenv("IPFS_GATEWAY_PUBLIC", "https://ipfs.io/ipfs/")
+
+def get_public_url(cid: str, is_local_dev: bool = False) -> str:
+    """
+    Resolves an IPFS hash (CID) to a URL, prioritizing local gateway 
+    if running, otherwise falling back to the public gateway.
+    """
+    if not cid:
+        return ""
+    
+    # 1. Determine the Base URL to use
+    if is_local_dev:
+        # If running locally, use the local gateway URL
+        base_url = IPFS_GATEWAY_LOCAL
+    else:
+        # For all other cases (production, public testing), use the public fallback
+        base_url = IPFS_GATEWAY_PUBLIC
+        
+    # Ensure the base URL ends with a slash before appending the CID
+    gateway = base_url.rstrip('/') + '/'
+    return f"{gateway}{cid}"

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from ml.inference import predict_species
 from utils.jwt import verify_token
 from utils.notify import notify
-from app.database import notification_collection, notification_helper,batch_collection, batch_helper
+from app.database import notification_collection, notification_helper, batches_col, batch_helper
 from app.ipfs_handler import upload_to_ipfs
 # ROUTERS
 from routes.auth import router as auth_router
@@ -75,7 +75,7 @@ async def create_batch_endpoint(data: BatchCreate, user=Depends(verify_token)): 
         }
     }
 
-    await batch_collection.insert_one(batch)
+    await batches_col.insert_one(batch)
 
     # --- Initial Fabric Anchor: Basic Facts Only ---
     await create_batch({
@@ -105,7 +105,7 @@ async def farmer_crops(farmer_id: str, user=Depends(verify_token)):
     if user["role"] != "Farmer" or user["id"] != farmer_id:
         raise HTTPException(403)
 
-    return [batch_helper(b) async for b in batch_collection.find({"farmer_id": farmer_id})]
+    return [batch_helper(b) async for b in batches_col.find({"farmer_id": farmer_id})]
 
 @app.post("/api/farmer/update-stage")
 async def farmer_update_stage(
@@ -117,11 +117,11 @@ async def farmer_update_stage(
     if user["role"] != "Farmer":
         raise HTTPException(403)
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch or batch["farmer_id"] != user["id"]:
         raise HTTPException(403)
 
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {"$set": {f"farmer_updates.stage_{stage}": data, "status": f"farmer_stage_{stage}_submitted"}}
     )
@@ -139,13 +139,13 @@ async def collector_update_stage(
     if user["role"] != "Collector":
         raise HTTPException(403)
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch or batch["collector_data"]["id"] != user["id"]:
         raise HTTPException(403)
 
     cid = await upload_to_ipfs(await photo.read(), photo.filename)
 
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {"$set": {
             f"growth_data.stage_{stage}": {
@@ -168,7 +168,7 @@ async def verify_leaf(
     if user["role"] != "Collector":
         raise HTTPException(403, "Collectors only")
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404, "Batch not found")
 
@@ -179,7 +179,7 @@ async def verify_leaf(
 
     match = predicted_species.lower() == expected_species.lower()
     if match:
-        await batch_collection.update_one(
+        await batches_col.update_one(
         {"batch_id": batch_id},
         {"$set": {"ml_verified": True}}
     )
@@ -207,7 +207,7 @@ async def collector_batches(user=Depends(verify_token)):
     if user["role"] != "Collector":
         raise HTTPException(403)
     
-    return [batch_helper(b) async for b in batch_collection.find({
+    return [batch_helper(b) async for b in batches_col.find({
         "collector_data.id": user["id"]
     })]
 
@@ -216,7 +216,7 @@ async def collector_batch(batch_id: str, user=Depends(verify_token)):
     if user["role"] != "Collector":
         raise HTTPException(403)
     
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch or batch.get("collector_data", {}).get("id") != user["id"]:
         raise HTTPException(403, "Not your batch")
     
@@ -241,7 +241,7 @@ async def get_active_batch(user=Depends(verify_token)):
         raise HTTPException(403)
     
     # Find most recent batch assigned to this collector
-    batch = await batch_collection.find_one(
+    batch = await batches_col.find_one(
         {"collector_data.id": user["id"]},
         sort=[("createdAt", -1)]
     )
@@ -278,7 +278,7 @@ async def get_stage_data(batch_id: str, stage: int, user=Depends(verify_token)):
     if user["role"] != "Collector":
         raise HTTPException(403)
     
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404, "Batch not found")
     
@@ -306,14 +306,14 @@ async def get_stage_data(batch_id: str, stage: int, user=Depends(verify_token)):
 async def admin_dashboard(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
-    return {"batches": [batch_helper(b) async for b in batch_collection.find()]}
+    return {"batches": [batch_helper(b) async for b in batches_col.find()]}
 
 @app.put("/api/admin/assign-collector/{batch_id}")
 async def assign_collector(batch_id: str, actor: ActorAssign, user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
 
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {"$set": {
             "collector_data": actor.dict(),
@@ -341,7 +341,7 @@ async def select_manufacturer(
     if user["role"] != "Admin":
         raise HTTPException(403)
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404)
 
@@ -357,7 +357,7 @@ async def select_manufacturer(
 
     label_id = f"LBL-{batch_id}-{random.randint(1000,9999)}"
 
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {"$set": {
             "manufacturer_data": {
@@ -389,7 +389,7 @@ async def accept_lab_task(batch_id: str = Body(...), user=Depends(verify_token))
         raise HTTPException(403)
 
     # Atomic lock: only one tester can win
-    result = await batch_collection.update_one(
+    result = await batches_col.update_one(
         {
             "batch_id": batch_id,
             "status": "testing_assigned"
@@ -417,7 +417,7 @@ async def lab_batches(user=Depends(verify_token)):
     if user["role"] != "Tester":
         raise HTTPException(403)
 
-    return [batch_helper(b) async for b in batch_collection.find({
+    return [batch_helper(b) async for b in batches_col.find({
         "$or": [{"status": "testing_assigned"}, {"lab_data.tester_id": user["id"]}]
     })]
 
@@ -434,7 +434,7 @@ async def submit_lab(
     result = json.loads(result_json)
     cid = await upload_to_ipfs(await report.read(), report.filename) if report else None
 
-    await batch_collection.update_one(
+    await batches_col.update_one(
     {"batch_id": batch_id},
     {"$set": {
         "lab_data.results": result,
@@ -462,7 +462,7 @@ async def submit_lab(
 
 
     # Notify Farmer
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     await notify(
         user_id=batch["farmer_id"],
         role="Farmer",
@@ -479,7 +479,7 @@ async def lab_history(user=Depends(verify_token)):
         raise HTTPException(403)
 
     history = []
-    async for b in batch_collection.find({
+    async for b in batches_col.find({
         "lab_data.tester_id": user["id"]
     }).sort("lab_data.submitted_at", -1):
         history.append({
@@ -553,7 +553,7 @@ async def anchor_batch(batch_id: str = Body(...), user=Depends(verify_token)):
     if user["role"] != "Collector":
         raise HTTPException(403, "Collectors only")
     
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404, "Batch not found")
     
@@ -589,7 +589,7 @@ async def anchor_batch(batch_id: str = Body(...), user=Depends(verify_token)):
         if not tx_hash:
             raise Exception("Fabric bridge did not return a transaction hash.")
         
-        await batch_collection.update_one(
+        await batches_col.update_one(
             {"batch_id": batch_id},
             {"$set": {
                 "blockchain_tx": tx_hash,
@@ -613,7 +613,7 @@ async def submit_quote(
         raise HTTPException(403, "Manufacturers only")
 
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404, "Batch not found")
 
@@ -639,7 +639,7 @@ async def submit_quote(
 }
 
 
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {"$push": {"quotes": quote}}
     )
@@ -650,7 +650,7 @@ async def get_quotes(batch_id: str, user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404)
 
@@ -665,7 +665,7 @@ async def submit_manufacturing(
     if user["role"] != "Manufacturer":
         raise HTTPException(403)
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404)
 
@@ -675,7 +675,7 @@ async def submit_manufacturing(
     if batch["manufacturer_data"]["id"] != user["id"]:
         raise HTTPException(403, "Not authorized")
     form = await request.form()
-    await batch_collection.update_one(
+    await batches_col.update_one(
     {"batch_id": batch_id},
     {"$set": {
         "manufacturing_data": {
@@ -695,7 +695,7 @@ async def publish_tester_request(
     if user["role"] != "Admin":
         raise HTTPException(403, "Admins only")
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404, "Batch not found")
 
@@ -713,7 +713,7 @@ async def publish_tester_request(
         raise HTTPException(400, "Batch not eligible for lab testing")
 
     # Update batch state
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {
             "$set": {
@@ -748,7 +748,7 @@ async def complete_packaging(
     if user["role"] != "Manufacturer":
         raise HTTPException(403)
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch:
         raise HTTPException(404)
 
@@ -766,7 +766,7 @@ async def complete_packaging(
     }
     anchor_response = await create_batch(fabric_anchor_payload)
     final_tx_hash = anchor_response.get("txHash") 
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {"$set": {
             "packaged_at": datetime.utcnow(),
@@ -784,7 +784,7 @@ async def manufacturer_batches(user=Depends(verify_token)):
 
     return [
         batch_helper(b)
-        async for b in batch_collection.find({
+        async for b in batches_col.find({
             "$or": [
                 {"status": "testing_assigned"},
                 {
@@ -798,7 +798,7 @@ async def manufacturer_batches(user=Depends(verify_token)):
 async def farmer_batches_simple(user=Depends(verify_token)):
     if user["role"] != "Farmer":
         raise HTTPException(403)
-    return [batch_helper(b) async for b in batch_collection.find({"farmer_id": user["id"]})]
+    return [batch_helper(b) async for b in batches_col.find({"farmer_id": user["id"]})]
 @app.post("/api/farmer/submit-stage-proof")
 async def farmer_submit_stage_proof(
     batch_id: str = Form(...),
@@ -810,13 +810,13 @@ async def farmer_submit_stage_proof(
     if user["role"] != "Farmer":
         raise HTTPException(403)
 
-    batch = await batch_collection.find_one({"batch_id": batch_id})
+    batch = await batches_col.find_one({"batch_id": batch_id})
     if not batch or batch["farmer_id"] != user["id"]:
         raise HTTPException(403, "Not your batch")
         
     cid = await upload_to_ipfs(await photo.read(), photo.filename)
 
-    await batch_collection.update_one(
+    await batches_col.update_one(
         {"batch_id": batch_id},
         {"$set": {
             f"farmer_updates.stage_{stage}": {

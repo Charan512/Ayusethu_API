@@ -1,5 +1,5 @@
 from datetime import datetime
-from database import notification_collection, user_collection
+from app.database import notification_collection, user_collection
 
 async def notify(
     user_id: str,

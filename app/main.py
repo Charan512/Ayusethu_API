@@ -1,4 +1,4 @@
-import json, random, os, httpx, uuid
+import json, os, httpx, uuid
 from fastapi import FastAPI, Depends, UploadFile, File, Form, Request, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -12,6 +12,7 @@ from app.ipfs_handler import upload_to_ipfs
 from routes.auth import router as auth_router
 from routes.batches import router as batch_router
 from routes.public import router as public_router
+from routes.admin import router as admin_router 
 from .blockchain_client import create_batch 
 from bson import ObjectId
 
@@ -30,6 +31,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api") 
 app.include_router(batch_router, prefix="/api") 
 app.include_router(public_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 # ================= CONFIG =================
 
 # ================= MODELS =================
@@ -299,88 +301,6 @@ async def get_stage_data(batch_id: str, stage: int, user=Depends(verify_token)):
 
 
 # =====================================================
-# 2️⃣ ADMIN FLOW
-# =====================================================
-
-@app.get("/api/admin/dashboard")
-async def admin_dashboard(user=Depends(verify_token)):
-    if user["role"] != "Admin":
-        raise HTTPException(403)
-    return {"batches": [batch_helper(b) async for b in batches_col.find()]}
-
-@app.put("/api/admin/assign-collector/{batch_id}")
-async def assign_collector(batch_id: str, actor: ActorAssign, user=Depends(verify_token)):
-    if user["role"] != "Admin":
-        raise HTTPException(403)
-
-    await batches_col.update_one(
-        {"batch_id": batch_id},
-        {"$set": {
-            "collector_data": actor.dict(),
-            "status": "collection_assigned",
-            "timeline.collection_assigned": datetime.utcnow().isoformat()
-        }}
-    )
-    await notify(
-    user_id=actor.id,
-    role="Collector",
-    title="New Collection Assigned",
-    message=f"You have been assigned to batch {batch_id}",
-    batch_id=batch_id,
-    category="assignment"
-    )
-
-    return {"message": "Collector assigned"}
-
-@app.post("/api/admin/select-manufacturer")
-async def select_manufacturer(
-    batch_id: str = Body(...),
-    manufacturer_id: str = Body(...),
-    user=Depends(verify_token)
-):
-    if user["role"] != "Admin":
-        raise HTTPException(403)
-
-    batch = await batches_col.find_one({"batch_id": batch_id})
-    if not batch:
-        raise HTTPException(404)
-
-    if batch["status"] != "bidding_open":
-        raise HTTPException(400, "Batch not in bidding state")
-
-    quote = next(
-        (q for q in batch.get("quotes", []) if q["manufacturer_id"] == manufacturer_id),
-        None
-    )
-    if not quote:
-        raise HTTPException(400, "Selected manufacturer has no quote")
-
-    label_id = f"LBL-{batch_id}-{random.randint(1000,9999)}"
-
-    await batches_col.update_one(
-        {"batch_id": batch_id},
-        {"$set": {
-            "manufacturer_data": {
-                "id": manufacturer_id,
-                "name": quote.get("manufacturer_name"),
-                "price": quote["price"],
-                "label_id": label_id
-            },
-            "status": "manufacturing_assigned"
-        }}
-    )
-    await notify(
-        user_id=manufacturer_id,
-        role="Manufacturer",
-        title="Manufacturing Assigned",
-        message=f"You have been selected to manufacture batch {batch_id}",
-        batch_id=batch_id,
-        category="manufacturing"
-    )
-
-    return {"message": "Manufacturer selected"}
-
-# =====================================================
 # 3️⃣ LAB FLOW
 # =====================================================
 @app.post("/api/lab/accept")
@@ -645,16 +565,7 @@ async def submit_quote(
     )
 
     return {"message": "Quote submitted successfully"}
-@app.get("/api/admin/quotes/{batch_id}")
-async def get_quotes(batch_id: str, user=Depends(verify_token)):
-    if user["role"] != "Admin":
-        raise HTTPException(403)
 
-    batch = await batches_col.find_one({"batch_id": batch_id})
-    if not batch:
-        raise HTTPException(404)
-
-    return batch.get("quotes", [])
 @app.post("/api/manufacturer/submit-manufacturing")
 async def submit_manufacturing(
     request: Request,
@@ -687,58 +598,6 @@ async def submit_manufacturing(
     }}
 )
     return {"message": "Manufacturing data submitted"}
-@app.post("/api/admin/publish-tester-request")
-async def publish_tester_request(
-    batch_id: str = Body(...),
-    user=Depends(verify_token)
-):
-    if user["role"] != "Admin":
-        raise HTTPException(403, "Admins only")
-
-    batch = await batches_col.find_one({"batch_id": batch_id})
-    if not batch:
-        raise HTTPException(404, "Batch not found")
-
-    # Prevent duplicate publishing
-    if batch.get("status") in ["testing_assigned", "testing_in_progress"]:
-        raise HTTPException(400, "Testing already published or in progress")
-
-    # Only allow after verification stage
-    if batch.get("status") in [
-    "testing_assigned",
-    "testing_in_progress",
-    "bidding_open",
-    "manufacturing_assigned"
-    ]:
-        raise HTTPException(400, "Batch not eligible for lab testing")
-
-    # Update batch state
-    await batches_col.update_one(
-        {"batch_id": batch_id},
-        {
-            "$set": {
-                "status": "testing_assigned",
-                "testing_published_at": datetime.utcnow()
-            }
-        }
-    )
-
-    # 🔔 Notify ALL testers (fan-out notification)
-    await notify(
-        user_id="ALL_TESTERS",
-        role="Tester",
-        title="New Lab Test Available",
-        message=f"Batch {batch_id} is available for testing. First to accept will be assigned.",
-        batch_id=batch_id,
-        category="lab"
-    )
-
-    return {
-        "message": "Tester request published successfully",
-        "batch_id": batch_id
-    }
-
-
 
 @app.post("/api/manufacturer/complete-packaging")
 async def complete_packaging(

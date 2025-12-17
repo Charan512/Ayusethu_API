@@ -41,7 +41,7 @@ class LoginRequest(BaseModel):
     password: str
     role: str
 
-    @field_validator('password')
+    @validator('password')
     @classmethod
     def validate_password_length(cls, v):
         if len(v.encode('utf-8')) > 72:

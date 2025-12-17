@@ -31,9 +31,17 @@ class RegisterRequest(BaseModel):
     @validator('password')
     @classmethod
     def validate_password_length(cls, v):
-        if len(v.encode('utf-8')) > 72:
-            # Truncate to 72 bytes for bcrypt compatibility
-            return v.encode('utf-8')[:72].decode('utf-8', 'ignore')
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            v = str(v)
+        encoded = v.encode('utf-8')
+        if len(encoded) > 72:
+            truncated = encoded[:72]
+            try:
+                return truncated.decode('utf-8')
+            except UnicodeDecodeError:
+                return truncated.decode('utf-8', 'ignore')
         return v
 
 class LoginRequest(BaseModel):

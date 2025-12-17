@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, validator
 from datetime import datetime
 
 from app.database import users_col, user_helper
@@ -28,7 +28,7 @@ class RegisterRequest(BaseModel):
     companyName: str | None = None
     licenseNumber: str | None = None
 
-    @field_validator('password')
+    @validator('password')
     @classmethod
     def validate_password_length(cls, v):
         if len(v.encode('utf-8')) > 72:

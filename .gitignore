@@ -20,4 +20,4 @@ __pycache__/
 # --- OS Files ---
 .DS_Store
 Thumbs.db
-api_check.py
+db_seeding.py

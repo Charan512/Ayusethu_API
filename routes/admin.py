@@ -1,19 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Body, Form, UploadFile, File, Request
 from app.database import batches_col, batch_helper,users_col
 from utils.jwt import verify_token
-
 from utils.notify import notify
-from pydantic import BaseModel # Import models used in main.py
+from pydantic import BaseModel
 from datetime import datetime
 import random
 from bson import ObjectId
-# Assuming ActorAssign model is defined elsewhere or moved here. We'll define it here for safety.
 class ActorAssign(BaseModel):
     id: str
     name: str
-    visit_date: str | None = None # Added based on common use case
+    visit_date: str | None = None 
 
-# 🛑 CRITICAL: Base path for all Admin routes in this file
+
 router = APIRouter(prefix="/admin", tags=["Admin"]) 
 
 # 1. Dashboard (The root data fetch) - Frontend call: adminApi.get("dashboard")
@@ -22,7 +20,6 @@ async def admin_dashboard(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
     
-    # Get real counts from database
     collector_count = await users_col.count_documents({"role": "Collector"})
     tester_count = await users_col.count_documents({"role": "Tester"})
     manufacturer_count = await users_col.count_documents({"role": "Manufacturer"})
@@ -181,24 +178,12 @@ async def publish_tester_request(
 # 6. /admin/collectors (Requires DB logic to fetch lists of users by role)
 @router.get("/collectors")
 async def admin_collectors(user=Depends(verify_token)):
-    print(f"🔄 DEBUG admin_collectors: Called by {user['email']}")
-    
-    # Test the exact query
-    from app.database import users_col
+    if user["role"] != "Admin":  
+        raise HTTPException(403)
     test_result = await users_col.find({"role": "Collector"}).to_list(length=5)
-    print(f"📊 DEBUG: Raw query found {len(test_result)} documents")
-    
-    if test_result:
-        print(f"📄 DEBUG: First document: {test_result[0]}")
-    
-    # Your existing code
     collectors = await users_col.find({"role": "Collector"}).to_list(length=100)
-    print(f"📊 DEBUG: Final query found {len(collectors)} collectors")
-    
-    # Check your transformation logic
     result = []
     for collector in collectors:
-        print(f"👤 DEBUG: Processing collector: {collector.get('fullName')}")
         result.append({
             "id": str(collector.get("_id")),
             "name": collector.get("fullName", "Unknown"),
@@ -210,17 +195,12 @@ async def admin_collectors(user=Depends(verify_token)):
             "rating": collector.get("rating", 0),
             "status": collector.get("status", "active")
         })
-    
-    print(f"📦 DEBUG: Returning {len(result)} transformed collectors")
     return result    
-    # ... rest of your code
 # 7. /admin/testers
 @router.get("/testers")
 async def admin_testers(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
-    
-    # REAL MongoDB query for Testers
     testers = await users_col.find({"role": "Tester"}).to_list(length=100)
     
     result = []

@@ -83,6 +83,14 @@ async def debug_db():
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+# Add to app/main.py (temporarily)
+@app.get("/api/admin/debug-version")
+async def debug_version():
+    return {
+        "version": "V2_WITH_MONGO_QUERIES",
+        "timestamp": datetime.utcnow().isoformat(),
+        "message": "This endpoint uses real MongoDB queries"
+    }
 # =====================================================
 # 1️⃣ COLLECTOR / FARMER FLOW
 # =====================================================

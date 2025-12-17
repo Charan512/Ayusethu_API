@@ -8,7 +8,7 @@ from datetime import datetime
 
 MONGO_URI = os.getenv("MONGO_URI")
 client = AsyncIOMotorClient(MONGO_URI)
-database = client["ayu_sethu_db"]
+database = client["ayusethu_db"]
 
 users_col = database["users"]
 batches_col = database["batches"]

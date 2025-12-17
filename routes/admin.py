@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Body, Form, UploadFile, File, Request
-from app.database import batches_col, batch_helper, notification_collection, notification_helper,users_col, user_helper
+from app.database import batches_col, batch_helper,users_col
 from utils.jwt import verify_token
+
 from utils.notify import notify
 from pydantic import BaseModel # Import models used in main.py
 from datetime import datetime
@@ -180,24 +181,38 @@ async def publish_tester_request(
 # 6. /admin/collectors (Requires DB logic to fetch lists of users by role)
 @router.get("/collectors")
 async def admin_collectors(user=Depends(verify_token)):
-    if user["role"] != "Admin":
-        raise HTTPException(403)
+    print(f"🔄 DEBUG admin_collectors: Called by {user['email']}")
     
-    print("🚀 DEBUG: admin_collectors endpoint called - USING REAL MONGO QUERIES")
-    print(f"📧 User: {user['email']}")
+    # Test the exact query
+    from app.database import users_col
+    test_result = await users_col.find({"role": "Collector"}).to_list(length=5)
+    print(f"📊 DEBUG: Raw query found {len(test_result)} documents")
     
-    # Add connection test
-    try:
-        # Test DB connection
-        client = users_col.database.client
-        await client.admin.command('ping')
-        print("✅ MongoDB connection verified")
-    except Exception as e:
-        print(f"❌ MongoDB error: {e}")
+    if test_result:
+        print(f"📄 DEBUG: First document: {test_result[0]}")
     
+    # Your existing code
     collectors = await users_col.find({"role": "Collector"}).to_list(length=100)
-    print(f"📊 DEBUG: Found {len(collectors)} collectors in database")
+    print(f"📊 DEBUG: Final query found {len(collectors)} collectors")
     
+    # Check your transformation logic
+    result = []
+    for collector in collectors:
+        print(f"👤 DEBUG: Processing collector: {collector.get('fullName')}")
+        result.append({
+            "id": str(collector.get("_id")),
+            "name": collector.get("fullName", "Unknown"),
+            "region": collector.get("region", "Unknown"),
+            "assignedBatches": collector.get("assignedBatches", 0),
+            "completed": collector.get("completed", 0),
+            "avgTime": collector.get("avgTime", "N/A"),
+            "accuracy": collector.get("accuracy", "0%"),
+            "rating": collector.get("rating", 0),
+            "status": collector.get("status", "active")
+        })
+    
+    print(f"📦 DEBUG: Returning {len(result)} transformed collectors")
+    return result    
     # ... rest of your code
 # 7. /admin/testers
 @router.get("/testers")

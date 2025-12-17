@@ -27,9 +27,9 @@ app.add_middleware(
 )
 
 # ================= ROUTERS =================
-app.include_router(auth_router)
-app.include_router(batch_router)
-app.include_router(public_router) 
+app.include_router(auth_router, prefix="/api") 
+app.include_router(batch_router, prefix="/api") 
+app.include_router(public_router, prefix="/api")
 # ================= CONFIG =================
 
 # ================= MODELS =================

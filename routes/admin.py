@@ -183,26 +183,22 @@ async def admin_collectors(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
     
-    # REAL MongoDB query for Collectors
+    print("🚀 DEBUG: admin_collectors endpoint called - USING REAL MONGO QUERIES")
+    print(f"📧 User: {user['email']}")
+    
+    # Add connection test
+    try:
+        # Test DB connection
+        client = users_col.database.client
+        await client.admin.command('ping')
+        print("✅ MongoDB connection verified")
+    except Exception as e:
+        print(f"❌ MongoDB error: {e}")
+    
     collectors = await users_col.find({"role": "Collector"}).to_list(length=100)
+    print(f"📊 DEBUG: Found {len(collectors)} collectors in database")
     
-    # Transform to match frontend expectations
-    result = []
-    for collector in collectors:
-        result.append({
-            "id": str(collector.get("_id")),
-            "name": collector.get("fullName", "Unknown"),
-            "region": collector.get("region", "Unknown"),
-            "assignedBatches": collector.get("assignedBatches", 0),
-            "completed": collector.get("completed", 0),
-            "avgTime": collector.get("avgTime", "N/A"),
-            "accuracy": collector.get("accuracy", "0%"),
-            "rating": collector.get("rating", 0),
-            "status": collector.get("status", "active")
-        })
-    
-    return result
-
+    # ... rest of your code
 # 7. /admin/testers
 @router.get("/testers")
 async def admin_testers(user=Depends(verify_token)):

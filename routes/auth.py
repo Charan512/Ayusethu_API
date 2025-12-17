@@ -11,7 +11,11 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# ================ CHANGE THIS ================
+# From bcrypt to pbkdf2_sha256 (no password length limit)
+pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+# ============================================
 
 # =========================
 # REQUEST MODELS
@@ -27,35 +31,31 @@ class RegisterRequest(BaseModel):
     labName: str | None = None
     companyName: str | None = None
     licenseNumber: str | None = None
-
+    
+    # ================ REMOVE OR KEEP VALIDATOR ================
+    # Optional: Keep for security but not required for length
     @validator('password')
     @classmethod
-    def validate_password_length(cls, v):
-        if v is None:
-            return v
-        if not isinstance(v, str):
-            v = str(v)
-        encoded = v.encode('utf-8')
-        if len(encoded) > 72:
-            truncated = encoded[:72]
-            try:
-                return truncated.decode('utf-8')
-            except UnicodeDecodeError:
-                return truncated.decode('utf-8', 'ignore')
+    def validate_password_strength(cls, v):
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
         return v
+    # ========================================================
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
     role: str
-
+    
+    # ================ REMOVE OR KEEP VALIDATOR ================
+    # Optional: Keep for consistency
     @validator('password')
     @classmethod
-    def validate_password_length(cls, v):
-        if len(v.encode('utf-8')) > 72:
-            # Truncate to 72 bytes for bcrypt compatibility
-            return v.encode('utf-8')[:72].decode('utf-8', 'ignore')
+    def validate_password_strength(cls, v):
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters')
         return v
+    # ========================================================
 
 # =========================
 # REGISTER
@@ -74,7 +74,7 @@ async def register_user(data: RegisterRequest):
         "fullName": data.fullName,
         "email": data.email,
         "role": data.role,
-        "passwordHash": pwd_ctx.hash(data.password),
+        "passwordHash": pwd_ctx.hash(data.password),  # This will work with pbkdf2
         "createdAt": datetime.utcnow(),
     }
     

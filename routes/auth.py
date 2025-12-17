@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from datetime import datetime
 
 from app.database import users_col, user_helper
@@ -13,7 +13,6 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 router = APIRouter(prefix="/auth", tags=["Auth"])
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-
 # =========================
 # REQUEST MODELS
 # =========================
@@ -23,20 +22,32 @@ class RegisterRequest(BaseModel):
     fullName: str
     email: EmailStr
     password: str
-
     phone: str | None = None
     organization: str | None = None
-
     labName: str | None = None
     companyName: str | None = None
     licenseNumber: str | None = None
 
+    @field_validator('password')
+    @classmethod
+    def validate_password_length(cls, v):
+        if len(v.encode('utf-8')) > 72:
+            # Truncate to 72 bytes for bcrypt compatibility
+            return v.encode('utf-8')[:72].decode('utf-8', 'ignore')
+        return v
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
     role: str
 
+    @field_validator('password')
+    @classmethod
+    def validate_password_length(cls, v):
+        if len(v.encode('utf-8')) > 72:
+            # Truncate to 72 bytes for bcrypt compatibility
+            return v.encode('utf-8')[:72].decode('utf-8', 'ignore')
+        return v
 
 # =========================
 # REGISTER
@@ -50,9 +61,9 @@ async def register_user(data: RegisterRequest):
     if await users_col.find_one({"email": data.email}):
         raise HTTPException(status_code=400, detail="Email already exists")
 
-
+    # Build user document
     user_doc = {
-        "fullName": data.fullName,  
+        "fullName": data.fullName,
         "email": data.email,
         "role": data.role,
         "passwordHash": pwd_ctx.hash(data.password),
@@ -80,30 +91,32 @@ async def register_user(data: RegisterRequest):
 
     await users_col.insert_one(user_doc)
     return {"message": "Registered successfully"}
+
+
 # =========================
 # LOGIN
 # =========================
 
 @router.post("/login")
 async def login_user(data: LoginRequest):
-
     # -------- ADMIN LOGIN --------
     if data.role == "Admin":
         if data.email != ADMIN_EMAIL or data.password != ADMIN_PASSWORD:
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
         token = create_token({
-            "id": str(user["_id"]),
-            "role": user["role"],
-            "email": user["email"],
-            "name": user.get("fullName", "User") 
+            "id": "ADMIN",
+            "role": "Admin",
+            "email": ADMIN_EMAIL,
+            "name": "Admin"
         })
 
         return {
             "user": {
                 "id": "ADMIN",
                 "role": "Admin",
-                "email": ADMIN_EMAIL
+                "email": ADMIN_EMAIL,
+                "name": "Admin"
             },
             "access_token": token
         }
@@ -114,13 +127,14 @@ async def login_user(data: LoginRequest):
         "role": data.role
     })
 
-    if not user or not pwd_ctx.verify(data.password, user.get("passwordHash")):
+    if not user or "passwordHash" not in user or not pwd_ctx.verify(data.password, user["passwordHash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_token({
         "id": str(user["_id"]),
         "role": user["role"],
-        "email": user["email"]
+        "email": user["email"],
+        "name": user.get("fullName", "User")
     })
 
     return {

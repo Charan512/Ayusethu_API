@@ -12,7 +12,7 @@ from app.ipfs_handler import upload_to_ipfs
 from routes.auth import router as auth_router
 from routes.batches import router as batch_router
 from routes.public import router as public_router
-from routes.admin import router as admin_router 
+from routes.admin import router as admin_router
 from .blockchain_client import create_batch 
 from bson import ObjectId
 
@@ -50,7 +50,39 @@ class BidSelection(BaseModel):
     manufacturer_id: str
     manufacturer_name: str
     winning_price: float
-
+# Add right after app = FastAPI()
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "AyuSethu API",
+        "version": "1.0",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+@app.get("/debug/db")
+async def debug_db():
+    """Check MongoDB connection and counts"""
+    from app.database import users_col
+    
+    try:
+        # Test connection
+        client = users_col.database.client
+        await client.admin.command('ping')
+        
+        # Get counts
+        total = await users_col.count_documents({})
+        collectors = await users_col.count_documents({"role": "Collector"})
+        
+        return {
+            "status": "connected",
+            "database": str(users_col.database),
+            "collection": str(users_col.name),
+            "total_users": total,
+            "collectors": collectors,
+            "connection_string": os.getenv("MONGO_URI", "not set")[:50] + "..."  # First 50 chars
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 # =====================================================
 # 1️⃣ COLLECTOR / FARMER FLOW
 # =====================================================

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Body, Form, UploadFile, File, Request
-from app.database import batches_col, batch_helper, notification_collection, notification_helper
+from app.database import batches_col, batch_helper, notification_collection, notification_helper,users_col, user_helper
 from utils.jwt import verify_token
 from utils.notify import notify
 from pydantic import BaseModel # Import models used in main.py
@@ -16,12 +16,29 @@ class ActorAssign(BaseModel):
 router = APIRouter(prefix="/admin", tags=["Admin"]) 
 
 # 1. Dashboard (The root data fetch) - Frontend call: adminApi.get("dashboard")
-@router.get("/dashboard") 
+@router.get("/dashboard")
 async def admin_dashboard(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
-    return {"batches": [batch_helper(b) async for b in batches_col.find()]}
-
+    
+    # Get real counts from database
+    collector_count = await users_col.count_documents({"role": "Collector"})
+    tester_count = await users_col.count_documents({"role": "Tester"})
+    manufacturer_count = await users_col.count_documents({"role": "Manufacturer"})
+    
+    # Get batches (you already have this)
+    batches = [batch_helper(b) async for b in batches_col.find()]
+    
+    return {
+        "kpis": {
+            "collectors": collector_count,
+            "testers": tester_count,
+            "manufacturers": manufacturer_count,
+            "batchesInProgress": len([b for b in batches if b.get("status") not in ["completed", "blockchain_anchored"]]),
+            "completedBatches": len([b for b in batches if b.get("status") in ["completed", "blockchain_anchored"]])
+        },
+        "batches": batches
+    }
 # 2. Assign Collector - Frontend call: adminApi.put("assign-collector/{batch_id}")
 @router.put("/assign-collector/{batch_id}")
 async def assign_collector(batch_id: str, actor: ActorAssign, user=Depends(verify_token)):
@@ -165,21 +182,68 @@ async def publish_tester_request(
 async def admin_collectors(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
-    # Placeholder for actual DB fetch
-    return [{"id": "C-101", "name": "Collector 1", "region": "North", "status": "active", "rating": 4.5, "assignedBatches": 10, "completed": 8, "avgTime": "2 days", "accuracy": "99%"}] 
+    
+    # REAL MongoDB query for Collectors
+    collectors = await users_col.find({"role": "Collector"}).to_list(length=100)
+    
+    # Transform to match frontend expectations
+    result = []
+    for collector in collectors:
+        result.append({
+            "id": str(collector.get("_id")),
+            "name": collector.get("fullName", "Unknown"),
+            "region": collector.get("region", "Unknown"),
+            "assignedBatches": collector.get("assignedBatches", 0),
+            "completed": collector.get("completed", 0),
+            "avgTime": collector.get("avgTime", "N/A"),
+            "accuracy": collector.get("accuracy", "0%"),
+            "rating": collector.get("rating", 0),
+            "status": collector.get("status", "active")
+        })
+    
+    return result
 
 # 7. /admin/testers
 @router.get("/testers")
 async def admin_testers(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
-    # Placeholder for actual DB fetch
-    return [{"id": "T-201", "name": "Test Lab 1", "accreditation": "ISO", "turnaround": "36 hrs", "accuracy": "99.1%", "acceptanceRate": "95%", "rating": 4.8, "status": "active"}] 
-
+    
+    # REAL MongoDB query for Testers
+    testers = await users_col.find({"role": "Tester"}).to_list(length=100)
+    
+    result = []
+    for tester in testers:
+        result.append({
+            "id": str(tester.get("_id")),
+            "name": tester.get("fullName", "Unknown Lab"),
+            "accreditation": tester.get("accreditation", "Unknown"),
+            "turnaround": tester.get("turnaround", "N/A"),
+            "accuracy": tester.get("accuracy", "0%"),
+            "acceptanceRate": tester.get("acceptanceRate", "0%"),
+            "rating": tester.get("rating", 0),
+            "status": tester.get("status", "active"),
+            "labName": tester.get("labName", ""),
+            "licenseNumber": tester.get("licenseNumber", "")
+        })
+    
+    return result
 # 8. /admin/manufacturers
 @router.get("/manufacturers")
 async def admin_manufacturers(user=Depends(verify_token)):
     if user["role"] != "Admin":
         raise HTTPException(403)
-    # Placeholder for actual DB fetch
-    return [{"id": "M-301", "name": "Mfg Co 1", "status": "active"}]
+    manufacturers = await users_col.find({"role": "Manufacturer"}).to_list(length=100)
+    
+    result = []
+    for manufacturer in manufacturers:
+        result.append({
+            "id": str(manufacturer.get("_id")),
+            "name": manufacturer.get("fullName", "Unknown Company"),
+            "status": manufacturer.get("status", "active"),
+            "companyName": manufacturer.get("companyName", ""),
+            "licenseNumber": manufacturer.get("licenseNumber", ""),
+            "email": manufacturer.get("email", "")
+        })
+    
+    return result

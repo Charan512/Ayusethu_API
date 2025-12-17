@@ -50,17 +50,18 @@ Frontend (Login.jsx) sends:
 """
 
 def user_helper(user: dict) -> dict:
+    """Convert MongoDB user document to dict"""
     return {
-        "id": str(user["_id"]),
-        "fullName": user.get("fullName"),
-        "email": user.get("email"),
-        "role": user.get("role"),
-        "phone": user.get("phone"),
-        "organization": user.get("organization"),
-        "labName": user.get("labName"),
-        "companyName": user.get("companyName"),
-        "licenseNumber": user.get("licenseNumber"),
-        "createdAt": user.get("createdAt"),
+        "id": str(user.get("_id", "")),
+        "fullName": user.get("fullName", ""),  
+        "email": user.get("email", ""),
+        "role": user.get("role", ""),
+        "phone": user.get("phone", ""),
+        "organization": user.get("organization", ""),
+        "labName": user.get("labName", ""),
+        "companyName": user.get("companyName", ""),
+        "licenseNumber": user.get("licenseNumber", ""),
+        "createdAt": user.get("createdAt", ""),
     }
 
 

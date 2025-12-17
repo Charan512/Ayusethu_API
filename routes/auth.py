@@ -44,22 +44,42 @@ class LoginRequest(BaseModel):
 
 @router.post("/register")
 async def register_user(data: RegisterRequest):
-
     if data.role == "Admin":
         raise HTTPException(status_code=403, detail="Admin cannot be registered")
 
     if await users_col.find_one({"email": data.email}):
         raise HTTPException(status_code=400, detail="Email already exists")
 
-    user_doc = data.dict(exclude={"password"})
-    user_doc["passwordHash"] = pwd_ctx.hash(data.password)
-    user_doc["createdAt"] = datetime.utcnow()
+
+    user_doc = {
+        "fullName": data.fullName,  
+        "email": data.email,
+        "role": data.role,
+        "passwordHash": pwd_ctx.hash(data.password),
+        "createdAt": datetime.utcnow(),
+    }
+    
+    # Add role-specific fields
+    if data.role == "Collector":
+        if data.phone:
+            user_doc["phone"] = data.phone
+        if data.organization:
+            user_doc["organization"] = data.organization
+            
+    elif data.role == "Tester":
+        if data.labName:
+            user_doc["labName"] = data.labName
+        if data.licenseNumber:
+            user_doc["licenseNumber"] = data.licenseNumber
+            
+    elif data.role == "Manufacturer":
+        if data.companyName:
+            user_doc["companyName"] = data.companyName
+        if data.licenseNumber:
+            user_doc["licenseNumber"] = data.licenseNumber
 
     await users_col.insert_one(user_doc)
-
     return {"message": "Registered successfully"}
-
-
 # =========================
 # LOGIN
 # =========================
@@ -73,9 +93,10 @@ async def login_user(data: LoginRequest):
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
         token = create_token({
-            "id": "ADMIN",
-            "role": "Admin",
-            "email": ADMIN_EMAIL
+            "id": str(user["_id"]),
+            "role": user["role"],
+            "email": user["email"],
+            "name": user.get("fullName", "User") 
         })
 
         return {
